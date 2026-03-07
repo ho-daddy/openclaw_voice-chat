@@ -15,7 +15,7 @@ OpenClaw 에이전트와 자연스러운 음성 대화를 할 수 있는 웹 기
 
 ## 요구사항
 
-- **Ubuntu** (또는 Linux) + **NVIDIA GPU** (CUDA, faster-whisper용)
+- **Ubuntu** (또는 Linux) + **NVIDIA GPU** + **CUDA Toolkit 12.x** (`sudo apt install nvidia-cuda-toolkit` 또는 [NVIDIA 공식 설치](https://developer.nvidia.com/cuda-downloads))
 - **Python 3.10+**
 - **Node.js 22+** + **OpenClaw** 게이트웨이 실행 중
 - **ffmpeg** (`sudo apt install ffmpeg`)
