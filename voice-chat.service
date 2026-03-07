@@ -6,11 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=hodaddy
-WorkingDirectory=/home/hodaddy/voice-chat
-ExecStart=/home/hodaddy/voice-chat/.venv/bin/python /home/hodaddy/voice-chat/server.py
+WorkingDirectory=/home/hodaddy/openclaw_voice-chat
+EnvironmentFile=/home/hodaddy/openclaw_voice-chat/.env
+Environment=PATH=/home/hodaddy/.local/share/fnm/node-versions/v22.22.0/installation/bin:/home/hodaddy/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/hodaddy/openclaw_voice-chat/.venv/bin/python /home/hodaddy/openclaw_voice-chat/server.py
 Restart=on-failure
 RestartSec=5
-Environment=PATH=/home/hodaddy/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target

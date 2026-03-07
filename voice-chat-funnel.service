@@ -1,0 +1,14 @@
+[Unit]
+Description=Tailscale Funnel for Voice Chat
+After=network-online.target tailscaled.service voice-chat.service
+Wants=network-online.target
+Requires=tailscaled.service voice-chat.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/hodaddy/openclaw_voice-chat/setup-tailscale-funnel.sh
+ExecStop=/usr/bin/tailscale funnel --https=443 off
+
+[Install]
+WantedBy=multi-user.target
