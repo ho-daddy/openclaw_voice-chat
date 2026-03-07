@@ -284,30 +284,29 @@ function updateState(state) {
 
 // --- Audio playback ---
 
-function playNextAudio() {
+async function playNextAudio() {
   if (isPlaying || audioQueue.length === 0) return;
+  if (!audioCtx) return;
   isPlaying = true;
 
   const blob = audioQueue.shift();
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-
-  audio.onended = () => {
-    URL.revokeObjectURL(url);
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const arrayBuf = await blob.arrayBuffer();
+    const audioBuf = await audioCtx.decodeAudioData(arrayBuf);
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(audioCtx.destination);
+    src.onended = () => {
+      isPlaying = false;
+      playNextAudio();
+    };
+    src.start();
+  } catch (e) {
+    console.error('Audio playback error:', e);
     isPlaying = false;
     playNextAudio();
-  };
-
-  audio.onerror = () => {
-    URL.revokeObjectURL(url);
-    isPlaying = false;
-    playNextAudio();
-  };
-
-  audio.play().catch(() => {
-    isPlaying = false;
-    playNextAudio();
-  });
+  }
 }
 
 function waitForAudioDone() {
