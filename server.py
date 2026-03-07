@@ -49,18 +49,51 @@ def get_eleven_client():
 # --- Helpers ---
 
 
+def get_voice_prefix() -> str:
+    """Build the voice-mode instruction prefix for the agent."""
+    default = (
+        "[음성 대화 모드] "
+        "지금 사용자와 음성으로 대화하고 있습니다. 다음 규칙을 반드시 지켜주세요: "
+        "1) 자연스러운 구어체(말투)로 답변하세요. "
+        "2) 이모지, 마크다운 서식(**굵게**, *기울임*, `코드` 등), 특수기호를 절대 사용하지 마세요. "
+        "3) 목록이나 번호 매기기 대신 자연스러운 문장으로 이어서 말하세요. "
+        "4) 답변은 간결하게 해주세요. 길어도 3~4문장 이내로요. "
+        "5) URL이나 코드 블록은 포함하지 마세요. "
+        "사용자 메시지: "
+    )
+    return os.getenv("VOICE_MODE_PREFIX", default)
+
+
 def clean_for_tts(text: str) -> str:
-    """Strip markdown formatting and emoji for cleaner TTS."""
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [link](url) -> link
-    text = re.sub(r"[*_~`#]", "", text)  # markdown chars
+    """Strip any remaining markdown, emoji, and non-speech artifacts for TTS."""
+    # Links: [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Bare URLs
+    text = re.sub(r"https?://\S+", "", text)
+    # Markdown formatting chars
+    text = re.sub(r"[*_~`#>]", "", text)
+    # Bullet points and numbered lists (e.g. "- item", "1. item")
+    text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)
+    # Code blocks (```...```)
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # All emoji (comprehensive Unicode ranges)
     text = re.sub(
         r"[\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f680-\U0001f6ff"
         r"\U0001f1e0-\U0001f1ff\U00002702-\U000027b0\U0001f900-\U0001f9ff"
         r"\U0001fa00-\U0001fa6f\U0001fa70-\U0001faff\U00002600-\U000026ff"
-        r"\U0000fe0f]+",
+        r"\U0000200d\U0000fe0f\U000020e3\U00003030\U000021a9-\U000021aa"
+        r"\U0000231a-\U0000231b\U00002328\U000023cf\U000023e9-\U000023f3"
+        r"\U000023f8-\U000023fa\U000024c2\U000025aa-\U000025ab\U000025b6"
+        r"\U000025c0\U000025fb-\U000025fe\U00002934-\U00002935"
+        r"\U00002b05-\U00002b07\U00002b1b-\U00002b1c\U00002b50\U00002b55"
+        r"\U00003297\U00003299]+",
         "",
         text,
     )
+    # Collapse multiple spaces/newlines
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"  +", " ", text)
     return text.strip()
 
 
@@ -117,10 +150,11 @@ async def transcribe(audio_path: str) -> str:
 
 
 async def call_agent(message: str, session_id: str) -> str:
+    prefixed = f"{get_voice_prefix()}{message}"
     cmd = [
         "openclaw", "agent",
         "--session-id", session_id,
-        "--message", message,
+        "--message", prefixed,
         "--json",
         "--timeout", os.getenv("OPENCLAW_TIMEOUT", "120"),
     ]
