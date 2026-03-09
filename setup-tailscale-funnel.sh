@@ -6,11 +6,7 @@ sleep 5
 
 # Reset any existing configuration
 /usr/bin/tailscale serve reset
+/usr/bin/tailscale funnel reset
 
-# Setup serve (internal proxy)
-/usr/bin/tailscale serve --bg 8000
-
-# Setup funnel (external access)
-/usr/bin/tailscale funnel --bg 8000
-
-echo "Tailscale Funnel setup complete"
+# Run funnel in foreground (includes serve, keeps process alive for systemd)
+exec /usr/bin/tailscale funnel 8000
