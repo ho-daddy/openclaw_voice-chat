@@ -240,7 +240,9 @@ async def call_agent(message: str, session_id: str, use_voice_prefix: bool = Tru
     if data.get("status") != "ok":
         raise RuntimeError(f"Agent status: {data.get('status')} - {data.get('summary')}")
 
-    return data["result"]["payloads"][0]["text"]
+    payloads = data["result"]["payloads"]
+    texts = [p["text"] for p in payloads if p.get("text")]
+    return texts
 
 
 async def generate_tts(text: str) -> bytes:
@@ -256,8 +258,8 @@ async def index():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
-async def _handle_agent_response(ws: WebSocket, response: str, input_mode: str):
-    """Classify the agent response and send speech/text/mixed back to the client."""
+async def _handle_single_response(ws: WebSocket, response: str):
+    """Classify and send a single agent response (message + TTS)."""
     classified = classify_response(response)
     mode = classified["mode"]
 
@@ -284,6 +286,12 @@ async def _handle_agent_response(ws: WebSocket, response: str, input_mode: str):
             await ws.send_bytes(audio)
 
         await ws.send_json({"type": "tts_done"})
+
+
+async def _handle_agent_response(ws: WebSocket, responses: list[str], input_mode: str):
+    """Handle multiple agent responses sequentially, then return to listening."""
+    for response in responses:
+        await _handle_single_response(ws, response)
 
     await ws.send_json({"type": "state", "state": "listening"})
 
@@ -323,10 +331,10 @@ async def websocket_endpoint(ws: WebSocket):
 
                     # 2) Agent (with voice prefix for spoken input)
                     await ws.send_json({"type": "state", "state": "thinking"})
-                    response = await call_agent(text, session_id, use_voice_prefix=True)
+                    responses = await call_agent(text, session_id, use_voice_prefix=True)
 
                     # 3) Classify and respond
-                    await _handle_agent_response(ws, response, "speech")
+                    await _handle_agent_response(ws, responses, "speech")
 
                 finally:
                     os.unlink(tmp.name)
@@ -345,10 +353,10 @@ async def websocket_endpoint(ws: WebSocket):
 
                     # Agent (no voice prefix for text input)
                     await ws.send_json({"type": "state", "state": "thinking"})
-                    response = await call_agent(content, session_id, use_voice_prefix=False)
+                    responses = await call_agent(content, session_id, use_voice_prefix=False)
 
                     # Classify and respond
-                    await _handle_agent_response(ws, response, "text")
+                    await _handle_agent_response(ws, responses, "text")
 
     except WebSocketDisconnect:
         pass
