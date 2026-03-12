@@ -117,6 +117,67 @@ def split_sentences(text: str) -> list[str]:
     return result
 
 
+# --- Response classification ---
+
+# Patterns for text-only content
+_RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```")
+_RE_URL = re.compile(r"https?://\S+")
+_RE_COMMAND = re.compile(r"^\s*[\$#]\s+.+", re.MULTILINE)
+_RE_FILE_PATH = re.compile(r"(?:^|\s)(?:[~/][\w./-]+(?:\.\w+)?)", re.MULTILINE)
+_RE_JSON_BLOCK = re.compile(r"\{[\s\S]{50,}?\}")
+
+
+def classify_response(text: str) -> dict:
+    """Classify agent response into speech/text/mixed mode.
+
+    Returns dict with keys: mode, speech, text.
+    - mode="speech": everything is speakable
+    - mode="text": everything is text-only (code, URLs, etc.)
+    - mode="mixed": some parts speech, some text-only
+    """
+    # Find all text-only segments
+    text_only_spans = []
+    for pattern in [_RE_CODE_BLOCK, _RE_URL, _RE_COMMAND, _RE_JSON_BLOCK]:
+        for m in pattern.finditer(text):
+            text_only_spans.append((m.start(), m.end(), m.group()))
+
+    if not text_only_spans:
+        return {"mode": "speech", "speech": text, "text": ""}
+
+    # Merge overlapping spans
+    text_only_spans.sort(key=lambda x: x[0])
+    merged = [text_only_spans[0]]
+    for start, end, content in text_only_spans[1:]:
+        if start <= merged[-1][1]:
+            prev_start, prev_end, prev_content = merged[-1]
+            merged[-1] = (prev_start, max(prev_end, end), text[prev_start:max(prev_end, end)])
+        else:
+            merged.append((start, end, content))
+
+    # Extract speech parts (everything not in text-only spans)
+    speech_parts = []
+    text_parts = []
+    pos = 0
+    for start, end, content in merged:
+        before = text[pos:start].strip()
+        if before:
+            speech_parts.append(before)
+        text_parts.append(content)
+        pos = end
+    trailing = text[pos:].strip()
+    if trailing:
+        speech_parts.append(trailing)
+
+    speech = " ".join(speech_parts).strip()
+    text_content = "\n".join(text_parts).strip()
+
+    if not speech:
+        return {"mode": "text", "speech": "", "text": text}
+    if not text_content:
+        return {"mode": "speech", "speech": text, "text": ""}
+    return {"mode": "mixed", "speech": speech, "text": text_content}
+
+
 # --- Core pipeline (sync, run in executor) ---
 
 
@@ -149,8 +210,8 @@ async def transcribe(audio_path: str) -> str:
     return await loop.run_in_executor(None, _transcribe_sync, audio_path)
 
 
-async def call_agent(message: str, session_id: str) -> str:
-    prefixed = f"{get_voice_prefix()}{message}"
+async def call_agent(message: str, session_id: str, use_voice_prefix: bool = True) -> str:
+    prefixed = f"{get_voice_prefix()}{message}" if use_voice_prefix else message
     cmd = [
         "openclaw", "agent",
         "--session-id", session_id,
@@ -179,7 +240,9 @@ async def call_agent(message: str, session_id: str) -> str:
     if data.get("status") != "ok":
         raise RuntimeError(f"Agent status: {data.get('status')} - {data.get('summary')}")
 
-    return data["result"]["payloads"][0]["text"]
+    payloads = data["result"]["payloads"]
+    texts = [p["text"] for p in payloads if p.get("text")]
+    return texts
 
 
 async def generate_tts(text: str) -> bytes:
@@ -195,6 +258,44 @@ async def index():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+async def _handle_single_response(ws: WebSocket, response: str):
+    """Classify and send a single agent response (message + TTS)."""
+    classified = classify_response(response)
+    mode = classified["mode"]
+
+    # Send the classified assistant message
+    await ws.send_json({
+        "type": "assistant_message",
+        "mode": mode,
+        "speech": classified["speech"],
+        "text": classified["text"],
+        "full": response,
+    })
+
+    # TTS for speech/mixed modes
+    if mode in ("speech", "mixed"):
+        await ws.send_json({"type": "state", "state": "speaking"})
+        clean = clean_for_tts(classified["speech"])
+        sentences = split_sentences(clean)
+
+        for sentence in sentences:
+            if not sentence:
+                continue
+            audio = await generate_tts(sentence)
+            await ws.send_json({"type": "audio_meta", "size": len(audio)})
+            await ws.send_bytes(audio)
+
+        await ws.send_json({"type": "tts_done"})
+
+
+async def _handle_agent_response(ws: WebSocket, responses: list[str], input_mode: str):
+    """Handle multiple agent responses sequentially, then return to listening."""
+    for response in responses:
+        await _handle_single_response(ws, response)
+
+    await ws.send_json({"type": "state", "state": "listening"})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -208,48 +309,54 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            data = await ws.receive_bytes()
+            msg = await ws.receive()
 
-            # Save audio to temp file
-            tmp = tempfile.NamedTemporaryFile(suffix=".webm", delete=False)
-            try:
-                tmp.write(data)
-                tmp.close()
+            if msg.get("bytes"):
+                # --- Voice input (binary audio) ---
+                data = msg["bytes"]
+                tmp = tempfile.NamedTemporaryFile(suffix=".webm", delete=False)
+                try:
+                    tmp.write(data)
+                    tmp.close()
 
-                # 1) STT
-                await ws.send_json({"type": "state", "state": "transcribing"})
-                text = await transcribe(tmp.name)
+                    # 1) STT
+                    await ws.send_json({"type": "state", "state": "transcribing"})
+                    text = await transcribe(tmp.name)
 
-                if not text.strip():
-                    await ws.send_json({"type": "state", "state": "listening"})
-                    continue
-
-                await ws.send_json({"type": "transcript", "text": text})
-
-                # 2) Agent
-                await ws.send_json({"type": "state", "state": "thinking"})
-                response = await call_agent(text, session_id)
-                await ws.send_json({"type": "response", "text": response})
-
-                # 3) TTS - sentence by sentence
-                await ws.send_json({"type": "state", "state": "speaking"})
-                clean = clean_for_tts(response)
-                sentences = split_sentences(clean)
-
-                for sentence in sentences:
-                    if not sentence:
+                    if not text.strip():
+                        await ws.send_json({"type": "state", "state": "listening"})
                         continue
-                    audio = await generate_tts(sentence)
-                    # Send audio length header then audio bytes
-                    await ws.send_json({"type": "audio_meta", "size": len(audio)})
-                    await ws.send_bytes(audio)
 
-                # Signal TTS complete
-                await ws.send_json({"type": "tts_done"})
-                await ws.send_json({"type": "state", "state": "listening"})
+                    await ws.send_json({"type": "transcript", "text": text, "mode": "speech"})
 
-            finally:
-                os.unlink(tmp.name)
+                    # 2) Agent (with voice prefix for spoken input)
+                    await ws.send_json({"type": "state", "state": "thinking"})
+                    responses = await call_agent(text, session_id, use_voice_prefix=True)
+
+                    # 3) Classify and respond
+                    await _handle_agent_response(ws, responses, "speech")
+
+                finally:
+                    os.unlink(tmp.name)
+
+            elif msg.get("text"):
+                # --- Text input (JSON message) ---
+                payload = json.loads(msg["text"])
+
+                if payload.get("type") == "user_message":
+                    content = payload.get("content", "").strip()
+                    if not content:
+                        continue
+
+                    # Echo user text back for display
+                    await ws.send_json({"type": "transcript", "text": content, "mode": "text"})
+
+                    # Agent (no voice prefix for text input)
+                    await ws.send_json({"type": "state", "state": "thinking"})
+                    responses = await call_agent(content, session_id, use_voice_prefix=False)
+
+                    # Classify and respond
+                    await _handle_agent_response(ws, responses, "text")
 
     except WebSocketDisconnect:
         pass
